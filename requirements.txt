@@ -1,0 +1,7 @@
+Flask
+opencv-python-headless
+matplotlib
+numpy
+scikit-image
+tqdm
+retina
