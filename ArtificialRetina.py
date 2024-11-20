@@ -25,7 +25,7 @@ class ArtificialRetina:
     '''
     def __init__(self,
                  image=None,
-                 P=0,
+                 input_image_resolution=(224,224),
                  foveation_type='dynamic',
                  dynamic_foveation_grid_size=(10,10),
                  fovea_center=0,
@@ -45,7 +45,7 @@ class ArtificialRetina:
                  output_dir=None,
                 ):
         self.image = image
-        self.P = P
+        self.input_image_resolution = input_image_resolution
         self.foveation_type = foveation_type
         self.dynamic_foveation_grid_size = dynamic_foveation_grid_size
         self.fovea_center = fovea_center
@@ -148,16 +148,29 @@ class ArtificialRetina:
         if img is None:
             img = self.image
 
-        # Ensure that if it's already an image array, no need to load it via OpenCV
+        # Ensure the input image is correctly loaded
         if isinstance(img, np.ndarray):
-            image_rgb = img
+            image_rgb = img  # If already an image array, use it directly
         else:
-            image = cv2.imread(img)  # This case handles if it's a file path
+            image = cv2.imread(img)  # If a file path, load the image
+            if image is None:
+                raise ValueError("Invalid image path or image could not be loaded.")
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
+        # Ensure input_image_resolution is a single integer
+        if isinstance(self.input_image_resolution, tuple):
+            self.input_image_resolution = self.input_image_resolution[0]
+
+        # Convert to integer if not already
+        if not isinstance(self.input_image_resolution, int):
+            self.input_image_resolution = int(self.input_image_resolution)
+
         # Resize the image to match the filter size (PxP)
-        preprocessed_image = cv2.resize(image_rgb, (self.P, self.P))
+        d_size = (self.input_image_resolution, self.input_image_resolution)
+        preprocessed_image = cv2.resize(image_rgb, d_size)  # Resize the image
         return preprocessed_image
+
+
 
         
     def display_info(self):
@@ -238,10 +251,10 @@ class ArtificialRetina:
     
     def create_retina_filter(self,):
         # create an empty 3D filter canvas of shape (PxPX3)
-        filter_canvas = np.zeros((self.P, self.P, 3), dtype=np.uint8)
+        filter_canvas = np.zeros((self.input_image_resolution, self.input_image_resolution, 3), dtype=np.uint8)
 
         # create a 2D mask for the circular fovea region
-        mask = np.zeros((self.P, self.P), dtype=np.uint8)
+        mask = np.zeros((self.input_image_resolution, self.input_image_resolution), dtype=np.uint8)
 
         # plot the fovea on the 2D mask
         '''

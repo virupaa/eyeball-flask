@@ -5,3 +5,5 @@ numpy
 scikit-image
 tqdm
 retina
+Flask-Cors
+
