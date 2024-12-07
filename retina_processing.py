@@ -2,7 +2,7 @@ import io
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from ArtificialRetina import ArtificialRetina
+from ArtificialRetina_OG import ArtificialRetina
 
 def process_image_from_stream(
     file_stream,
@@ -28,7 +28,8 @@ def process_image_from_stream(
 
     # Read the image from the file stream
     file_bytes = np.frombuffer(file_stream.read(), np.uint8)
-    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    image_raw = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    image = cv2.cvtColor(image_raw, cv2.COLOR_BGR2RGB)  # Convert to RGB format
     if image is None:
         raise ValueError("Failed to decode the image. Ensure the file is a valid image.")
 

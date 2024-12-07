@@ -1,80 +1,89 @@
-from flask import Flask, request, render_template, send_file
-import zipfile
-import io
-from retina_processing import process_image_from_stream  # Correct import path
-import os
+from flask import Flask, request, jsonify
+from ArtificialRetina import ArtificialRetina
+import json
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# Function to process all images in a zip folder
-def process_folder(zip_file):
-    output_zip_stream = io.BytesIO()
-    with zipfile.ZipFile(zip_file, 'r') as zip_ref, zipfile.ZipFile(output_zip_stream, 'w') as output_zip:
-        for filename in zip_ref.namelist():
-            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                # Read the image file from the zip
-                with zip_ref.open(filename) as file_stream:
-                    output_image_stream = process_image_from_stream(file_stream)
-                    output_zip.writestr(f'processed_{filename}', output_image_stream.getvalue())
-    output_zip_stream.seek(0)
-    return output_zip_stream
-
 @app.route('/')
 def index():
     return "Hello, World!"
 
+# Input: parameters, [inputImage_0, inputImage_1, ...]
 @app.route('/process', methods=['POST'])
 def process():
-    # Print all form data
-    print("Received Form Data:")
-    for key, value in request.form.items():
-        print(f"{key}: {value}")
-    
-    if 'file' in request.files:
-        file = request.files['file']
+    try:
+        if 'parameters' not in request.form:
+            return "No parameters provided", 400
         
-        # Extract parameters from request.form
-        fovea_radius = int(request.form.get("fovea_radius", 15))
-        peripheral_active_cones = int(request.form.get("peripheral_cone_cells", 0))
-        fovea_active_rods = int(request.form.get("fovea_rod_cells", 0))
-        peripheral_blur_enabled = request.form.get("peripheral_blur_enabled", "False") == "True"
-        peripheral_blur_kernal = tuple(map(int, request.form.get("kernel_value", "(21, 21)").strip("()").split(",")))
-        foveation_type = request.form.get("fovea_type", "static")
-        verbose = request.form.get("verbose", "False") == "True"
-        peripheral_gaussian_sigma = int(request.form.get("peripheral_gaussian_sigma", 2))
-        fovea_x = int(request.form.get("fovea_x", 0))
-        fovea_y = int(request.form.get("fovea_y", 0))
-        input_image_resolution = float(request.form.get("input_image_resolution", 320)),
-        peripheral_grayscale = request.form.get("peripheral_grayscale", "True") == "True"
+        if len(request.files) == 0:
+            return "No images provided", 400
 
-        # Pass these parameters to the processing function
-        if zipfile.is_zipfile(file):
-            print("Processing a folder (ZIP file).")
-            output_zip_stream = process_folder(file)
-            return send_file(output_zip_stream, as_attachment=True, attachment_filename='processed_images.zip', mimetype='application/zip')
-        else:
-            print("Processing a single image.")
-            output_image_stream = process_image_from_stream(
-                file_stream=file,
-                fovea_radius=fovea_radius,
-                peripheral_active_cones=peripheral_active_cones,
-                fovea_active_rods=fovea_active_rods,
-                peripheral_blur_enabled=peripheral_blur_enabled,
-                peripheral_blur_kernal=peripheral_blur_kernal,
-                foveation_type=foveation_type,
-                verbose=verbose,
-                peripheral_gaussian_sigma=peripheral_gaussian_sigma,
-                fovea_x=fovea_x,
-                fovea_y=fovea_y,
-                input_image_resolution=input_image_resolution,
-                peripheral_grayscale=peripheral_grayscale
+        parameters = request.form['parameters']
+        parameters = json.loads(parameters) # Convert string to dictionary
+
+        inputImageResolution = int(parameters.get("inputImageResolution", 320))
+        foveaRadius = int(parameters.get("foveaRadius", 15))
+        foveaX = int(parameters.get("foveaX", 0))
+        foveaY = int(parameters.get("foveaY", 0))
+        peripheralConeCells = int(parameters.get("peripheralConeCells", 0))
+        foveaRodCells = int(parameters.get("foveaRodCells", 0))
+        isPeripheralBlurEnabled = parameters.get("isPeripheralBlurEnabled", "False") == "True"
+        kernelValue = tuple(map(int, parameters.get("kernelValue", "(21, 21)").strip("()").split(",")))
+        peripheralSigma = float(parameters.get("peripheralSigma", 2))
+        isPeripheralGrayscale = parameters.get("isPeripheralGrayscale", "true") == "true"
+        foveationType = parameters.get("foveationType", "static")
+        retinalWarp = parameters.get("retinalWarp", "true") == "true"
+
+        processed_images = []
+        try:
+            retina = ArtificialRetina(
+            P=inputImageResolution,
+            fovea_radius=foveaRadius,
+            fovea_center=(foveaX, foveaY),
+            peripheral_active_cones=peripheralConeCells,
+            fovea_active_rods=foveaRodCells,
+            peripheral_gaussianBlur=isPeripheralBlurEnabled,
+            peripheral_gaussianBlur_kernal=kernelValue,
+            peripheral_gaussianBlur_sigma=peripheralSigma,
+            peripheral_grayscale=isPeripheralGrayscale,
+            foveation_type=foveationType,
+            dynamic_foveation_grid_size=(2, 2),
+            retinal_warp=retinalWarp,
             )
-            return send_file(output_image_stream, as_attachment=True, attachment_filename='processed_image.png', mimetype='image/png')
-    else:
-        print("No file uploaded.")
-        return "No file uploaded", 400
+        except Exception as e:
+            return f"Failed to create ArtificialRetina object: {str(e)}", 500
+            
+        if foveationType == "static":
+            for key in request.files:
+                if key.startswith('inputImage_'):
+                    try:
+                        file_stream = request.files[key].stream
+                        processed_images.append(f"data:image/png;base64,{retina.apply(current_image=file_stream)}")
+                    except Exception as e:
+                        return f"Failed to process image {key}: {str(e)}", 500
+        elif foveationType == "dynamic":
+            file_keys = list(request.files.keys())
+            for i in range(len(file_keys) - 1):
+                try:
+                    current_file = request.files[file_keys[i]]
+                    next_file = request.files[file_keys[i + 1]]
+                    processed_images.append(f"data:image/png;base64,{retina.apply(current_image=current_file.stream, next_image=next_file.stream)}")
+                except Exception as e:
+                    return f"Failed to process image {file_keys[i]} or {file_keys[i + 1]}: {str(e)}", 500
+            try:
+                last_file = request.files[file_keys[-1]]
+                processed_images.append(f"data:image/png;base64,{retina.apply(current_image=last_file.stream)}")
+            except Exception as e:
+                return f"Failed to process image {file_keys[-1]}: {str(e)}", 500
+        else:
+            return "Invalid foveation type", 400
+
+        return jsonify({"processedImages": processed_images}), 200
+    except Exception as e:
+        print("fail", e)
+        return str(e), 500
 
 if __name__ == '__main__':
-    app.run()
+    app.run(debug=True)

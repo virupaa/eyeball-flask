@@ -1,12 +1,9 @@
-'''
-for retinal warp, cite -
-https://github.com/dicarlolab/retinawarp/
-'''
-import numpy as np
 import cv2
+import numpy as np
+import matplotlib.pyplot as plt
 from skimage.transform import resize
-from retina.retina import warp_image
-import base64
+# from retina.retina import warp_image
+
 class ArtificialRetina:
     '''
     [args]:
@@ -27,52 +24,78 @@ class ArtificialRetina:
     
     '''
     def __init__(self,
-                 P=0,
+                 image=None,
+                 input_image_resolution=(224,224),
+                 foveation_type='dynamic',
+                 dynamic_foveation_grid_size=(10,10),
                  fovea_center=0,
                  fovea_radius=0,
                  peripheral_active_cones=0,
                  fovea_active_rods=0,
+                 visual_crowding=False,
                  peripheral_gaussianBlur=True,
                  peripheral_gaussianBlur_kernal=(21,21),
                  peripheral_gaussianBlur_sigma=0,
                  peripheral_grayscale=True,
-                 foveation_type='dynamic',
-                 dynamic_foveation_grid_size=(10,10),
                  retinal_warp=False,
+                 display_output=False,
+                 verbose=True,
+                 video=None,
+                 save_output=False,
+                 output_dir=None,
                 ):
-        self.P = P
+        self.image = image
+        self.input_image_resolution = input_image_resolution
         self.foveation_type = foveation_type
         self.dynamic_foveation_grid_size = dynamic_foveation_grid_size
         self.fovea_center = fovea_center
         self.fovea_radius = fovea_radius
         self.peripheral_active_cones = peripheral_active_cones
         self.fovea_active_rods = fovea_active_rods
+        self.visual_crowding = visual_crowding
         self.peripheral_gaussianBlur = peripheral_gaussianBlur
         self.peripheral_gaussianBlur_kernal = peripheral_gaussianBlur_kernal
         self.peripheral_gaussianBlur_sigma = peripheral_gaussianBlur_sigma
         self.peripheral_grayscale = peripheral_grayscale
         self.retinal_warp = retinal_warp
+        self.display_output = display_output
+        self.verbose = verbose
+        self.video = video
+        self.save_output = save_output
+        self.output_dir = output_dir
 
-    def apply(self, current_image, next_image=None) -> np.array:
-        preprocessed_image = self.preprocess(current_image)
+        # check for errors
+        self.checks()
+            
+        
+        # open and pre-process RGB image
+        self.preprocessed_image = self.preprocess()
+        
 
         # dynamically adjust the fovea location based on optic flow magnitude
         if self.foveation_type == 'dynamic':
             # get next frame (t+1)
-            # pre-process the next_frame
-            next_frame_proc = self.preprocess(next_image)
-            if next_frame_proc is not None:
+            self.next_frame = self.get_next_frame()
 
-                # pass t and t+1 frames to get coordinates for dynamic foveation
-                fovea_x, fovea_y = self.dynamic_fovea(prev_frame=preprocessed_image, current_frame=next_frame_proc, grid_size=self.dynamic_foveation_grid_size)
-                
-                # update self.center
-                self.fovea_center = (fovea_x,fovea_y)
+            # pre-process the next_frame
+            self.next_frame_proc = self.preprocess(img=self.next_frame)
+
+            # pass t and t+1 frames to get coordinates for dynamic foveation
+            fovea_x, fovea_y = self.dynamic_fovea(prev_frame=self.preprocessed_image, current_frame=self.next_frame_proc, grid_size=self.dynamic_foveation_grid_size)
+            
+            # update self.center
+            self.fovea_center = (fovea_x,fovea_y)
+    
+            
+
+        # display selected settings
+        if self.verbose:
+            self.display_info()
 
         # create retina_filter and generate parts of the retina
         self.filter_canvas, self.fovea, self.peripheral_mask = self.create_retina_filter()
         # apply retinal filter on image
-        retina_image = self.apply_retina_filter(preprocessed_image)
+        self.retina_image = self.apply_retina_filter()
 
         # activate cones and rods in peripheral and fovea respectively
         # randomly select x% of pixels in the fovea and make them grayscale
@@ -81,8 +104,11 @@ class ArtificialRetina:
             mask=self.fovea)
 
         self.__apply_random_pixel_effect(
-            retina_image=retina_image, original_image=preprocessed_image, 
+            retina_image=self.retina_image, 
             selected_indices=self.fovea_selected_indices, effect='grayscale')
+
+        if self.verbose:
+            print("[INFO] {}% rods turned active in the fovea".format(self.fovea_active_rods))
 
         # randomly select y% of pixels in the peripheral and remove grayscale effect
         self.peripheral_selected_indices = self.__select_random_pixels(
@@ -90,39 +116,108 @@ class ArtificialRetina:
             mask=self.peripheral_mask)
 
         self.__apply_random_pixel_effect(
-            retina_image=retina_image, original_image=preprocessed_image,
+            retina_image=self.retina_image, 
             selected_indices=self.peripheral_selected_indices, effect='color')
 
+        if self.verbose:
+            print("[INFO] {}% cones turned active in the peripheral".format(self.peripheral_active_cones))
+
         if self.retinal_warp == True:
-            retina_image = self.apply_retinalWarp(retina_image)*255
+            self.ret_warp = self.apply_retinalWarp()
         
-        _, buffer = cv2.imencode('.png', retina_image)
-        retina_image_base64 = base64.b64encode(buffer).decode('utf-8')
-        return retina_image_base64
-    
+        # display the output image from the artificial retina
+        if self.display_output:
+            self.output_image()
+
+
     # check if all the variables are properly assigned
     def checks(self,):
+        if self.image is None and self.video is None:
+            raise ValueError("Image or video must be provided as input.")
         if self.fovea_radius <= 0:
             raise ValueError("Fovea radius must be greater than 0.")
+        if self.output_dir is not None and not isinstance(self.output_dir, str):
+            raise TypeError("output_dir must be a string.")
+        if self.save_output is True and self.output_dir is None:
+            raise ValueError("Output dir not specified.")
         if self.foveation_type not in ['dynamic', 'static']:
             raise ValueError("Unsupported foveation type. Choose from ['dynamic', 'static']")
 
     # pre-process the raw RGB image before mapping on the retina filter
-    def preprocess(self, image_stream = None):
-        if image_stream:
-            # Reset the file stream in case it's been read already
-            image_stream.seek(0)
+    def preprocess(self, img=None):
+        if img is None:
+            img = self.image
 
-            # Read the image from the file stream
-            file_bytes = np.frombuffer(image_stream.read(), np.uint8)
-            raw_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-            RGB_image = cv2.cvtColor(raw_image, cv2.COLOR_BGR2RGB)
-            cropped_image = cv2.resize(RGB_image, (self.P, self.P))
-            preprocessed_image = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)  # Convert to RGB format
-
-            return preprocessed_image
+        # Ensure the input image is correctly loaded
+        if isinstance(img, np.ndarray):
+            image_rgb = img  # If already an image array, use it directly
         else:
-            return None
+            image = cv2.imread(img)  # If a file path, load the image
+            if image is None:
+                raise ValueError("Invalid image path or image could not be loaded.")
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Ensure input_image_resolution is a single integer
+        if isinstance(self.input_image_resolution, tuple):
+            self.input_image_resolution = self.input_image_resolution[0]
+
+        # Convert to integer if not already
+        if not isinstance(self.input_image_resolution, int):
+            self.input_image_resolution = int(self.input_image_resolution)
+
+        # Resize the image to match the filter size (PxP)
+        d_size = (self.input_image_resolution, self.input_image_resolution)
+        preprocessed_image = cv2.resize(image_rgb, d_size)  # Resize the image
+        return preprocessed_image
+
+
+
+        
+    def display_info(self):
+        print(f'''
+        Image Information:
+        -----------------
+        Image size: {self.P}x{self.P}
+        
+        Fovea Information:
+        ------------------
+        Fovea type: {self.foveation_type}
+        Dynamic fovea grid size: {self.dynamic_foveation_grid_size}
+        Fovea center: {self.fovea_center}
+        Fovea radius: {self.fovea_radius}
+        Fovea active rods: {self.fovea_active_rods}%
+        
+        Peripheral Information:
+        -----------------------
+        Peripheral active cones: {self.peripheral_active_cones}%
+        Peripheral Gaussian Blur: {self.peripheral_gaussianBlur}
+        Peripheral Gaussian Blur kernel: {self.peripheral_gaussianBlur_kernal}
+        Peripheral Gaussian Blur sigma: {self.peripheral_gaussianBlur_sigma}
+        Peripheral Grayscale: {self.peripheral_grayscale}
+        
+        Additional Settings:
+        --------------------
+        Video input: {self.video is not None}
+        Save output: {self.save_output}
+        Output directory: {self.output_dir if self.save_output else 'N/A'}
+        Retinal Warp: {self.retinal_warp}
+        ''')
+
+    # Function to generate the frame at timestamp t+1, given frame at timestamp t
+    # Only used when foveation_type=dynamic
+    def get_next_frame(self):
+    # Check if the image is a file path (string) or in-memory image (numpy array)
+        if isinstance(self.image, str):
+            # If the image is a file path, proceed with file path manipulation
+            base, num_ext = self.image.rsplit('_', 1)
+            num, ext = num_ext.split('.')
+            next_frame = f"{base}_{int(num) + 1}.{ext}"
+            return next_frame
+        else:
+            # If the image is an in-memory numpy array, return None or raise an appropriate error
+            # since we cannot get the next frame from an in-memory image unless you handle it differently
+            raise ValueError("Dynamic foveation requires a file path for sequential image frames.")
+
 
     # Function to calculate optical flow and dynamically determine new fovea position
     def dynamic_fovea(self, prev_frame=None, current_frame=None, grid_size=(10, 10)):
@@ -156,10 +251,10 @@ class ArtificialRetina:
     
     def create_retina_filter(self,):
         # create an empty 3D filter canvas of shape (PxPX3)
-        filter_canvas = np.zeros((self.P, self.P, 3), dtype=np.uint8)
+        filter_canvas = np.zeros((self.input_image_resolution, self.input_image_resolution, 3), dtype=np.uint8)
 
         # create a 2D mask for the circular fovea region
-        mask = np.zeros((self.P, self.P), dtype=np.uint8)
+        mask = np.zeros((self.input_image_resolution, self.input_image_resolution), dtype=np.uint8)
 
         # plot the fovea on the 2D mask
         '''
@@ -174,11 +269,14 @@ class ArtificialRetina:
 
         # create mask for the peripheral region of the retina
         peripheral_mask = cv2.bitwise_not(fovea)
+        
+        if self.verbose:
+            print("[INFO] Retina filter created")
 
         return filter_canvas, fovea, peripheral_mask
 
     
-    def apply_retina_filter(self, image: np.array):
+    def apply_retina_filter(self,):
         '''
         method 1 (in version 0.1)
         the gaussian blur operation is only applied to the peripheral region and the fovea
@@ -209,6 +307,9 @@ class ArtificialRetina:
         # # Finally, combine the fovea and the processed peripheral region
         # combined_image = cv2.bitwise_or(fovea_region, peripheral_region)
 
+        # if self.verbose:
+        #     print("[INFO] Retina filter applied")
+
         '''
         method 2 (in version 0.2)
         the foveal boundary issue in versio 0.1 was fixed in this version. Specifically, 
@@ -217,10 +318,10 @@ class ArtificialRetina:
         only the peripheral region is swapped in the original image. This creates a smooth 
         transition between the fovea and the peripheral region.
         '''
-        sample = image.copy()
+        sample = self.preprocessed_image.copy()
         # apply Gaussian blur to the entire image
         if self.peripheral_gaussianBlur == True:
-            sample = cv2.GaussianBlur(image, self.peripheral_gaussianBlur_kernal, self.peripheral_gaussianBlur_sigma, borderType=cv2.BORDER_DEFAULT)
+            sample = cv2.GaussianBlur(self.preprocessed_image, self.peripheral_gaussianBlur_kernal, self.peripheral_gaussianBlur_sigma, borderType=cv2.BORDER_DEFAULT)
         
         # Convert the blurred image to grayscale
         if self.peripheral_grayscale == True:
@@ -229,8 +330,22 @@ class ArtificialRetina:
             sample = cv2.merge([sample_gray, sample_gray, sample_gray])
             
         # Combine the fovea region from the original image with the grayscale blurred peripheral region
-        combined_image = image.copy()
+        combined_image = self.preprocessed_image.copy()
         combined_image[self.peripheral_mask == 255] = sample[self.peripheral_mask == 255]
+
+
+        # EXPERIMENTAL CODE
+        
+        # # Define the color for the fovea region (red in BGR format)
+        # fovea_color = [255, 0, 0]  # OpenCV uses BGR format, so red is [0, 0, 255]
+        
+        # # Apply the color to the fovea region
+        # combined_image[self.peripheral_mask != 255] = fovea_color
+
+        # END OF EXPERIMENTAL CODE
+        
+        if self.verbose:
+            print("[INFO] Retina filter applied")
 
         return combined_image
 
@@ -249,24 +364,39 @@ class ArtificialRetina:
         return selected_indices
 
     # private function to activate rods and cones at specified coordinates
-    def __apply_random_pixel_effect(self, retina_image, original_image, selected_indices, effect):
+    def __apply_random_pixel_effect(self, retina_image, selected_indices, effect):
         # apply the specified effect to the randomly selected pixels
         for y, x in selected_indices:
             if effect == 'grayscale':
                 retina_image[y, x] = np.mean(retina_image[y, x])
             elif effect == 'color':
-                retina_image[y, x] = original_image[y, x]
+                retina_image[y, x] = self.preprocessed_image[y, x]
             else:
                 raise ValueError("Unsupported effect type. Supported types are 'grayscale' and 'color'.")
     
-    def apply_retinalWarp(self, image):
-        '''
-        for img (224x224 res):
-        resize_scale = 4,
-        output_size and input_size = 750
-        '''
-        RESIZE_SCALE = 4
-        img = resize(image, np.array(RESIZE_SCALE * np.array(image.shape[:2]), dtype=int))
-        ret_img = warp_image(img, output_size=self.P, input_size=self.P)
-        return ret_img
+    # def apply_retinalWarp(self,):
+    #     '''
+    #     for img (224x224 res):
+    #     resize_scale = 4,
+    #     output_size and input_size = 750
+    #     '''
+    #     RESIZE_SCALE = 4
+    #     img = resize(self.retina_image, np.array(RESIZE_SCALE * np.array(self.retina_image.shape[:2]), dtype=int))
+    #     ret_img = warp_image(img, output_size=750, input_size=750)
+    #     return ret_img
             
+    # plot/save the image
+    def output_image(self,):
+        if self.video is None:
+            # Display the image using matplotlib
+            plt.imshow(self.retina_image)
+            #plt.title('Retina Filter Applied')
+            plt.axis('off')
+            plt.show()
+
+        if self.retinal_warp is True:
+            # Display the image using matplotlib
+            plt.imshow(self.ret_warp)
+            #plt.title('Retina Filter with Retinal Warp Applied')
+            plt.axis('off')
+            plt.show()
